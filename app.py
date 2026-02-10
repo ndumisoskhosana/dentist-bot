@@ -118,6 +118,11 @@ def send_emergency_sms(user_msg, user_number):
     except Exception as e:
         print(f"DEBUG: SMS Failed: {e}")
 
+# --- NEW: FRONT DOOR FOR CRON JOB ---
+@app.route("/", methods=['GET'])
+def home():
+    return "I am alive! The dentist bot is running."
+
 @app.route("/webhook", methods=['POST'])
 def whatsapp_reply():
     sender_id = request.form.get('From')
