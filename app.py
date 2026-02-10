@@ -17,13 +17,15 @@ groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1"
 )
 
-# Optional: Only needed if you want the SMS alert feature working
-twilio_client = None
-if os.environ.get("TWILIO_ACCOUNT_SID"):
-    twilio_client = TwilioClient(
+# Only needed if you want the SMS alert feature working
+twilio_sms_client = None
+try:
+    twilio_sms_client = TwilioClient(
         os.environ.get("TWILIO_ACCOUNT_SID"),
         os.environ.get("TWILIO_AUTH_TOKEN")
     )
+except Exception as e:
+    print(f"Warning: Twilio SMS not set up. {e}")
 
 # --- CONFIGURATION ---
 # For the demo, put YOUR number here so YOU get the alert!
@@ -58,7 +60,9 @@ Your goal is to be professional, warm, and efficient.
 1. **Escalation:** If the user asks for a human, is angry, or has a medical emergency (swelling/bleeding), output strictly: ACTION_ESCALATE
 2. **Booking:** If user confirms a slot, output: ACTION_BOOK: Day|Time
 3. **Full:** If no slots are open, output: ACTION_LOG_MISSED
-4. **Tone:** Use South African warmth. Keep replies short for WhatsApp.
+4. **EMERGENCY / HUMAN HANDOFF:** If the user seems angry, asks for a human, or describes a medical emergency (pain, swelling, bleeding), 
+   you MUST end your reply with the hidden tag: ACTION_ESCALATE
+5. **Tone:** Use South African warmth. Keep replies short for WhatsApp.
 """
 
 # --- HELPER FUNCTIONS ---
@@ -94,20 +98,26 @@ def log_missed_revenue(user_number):
         f.write(f"[{timestamp}] Lost Patient: {user_number} (No Slots)\n")
 
 def send_emergency_sms(user_msg, user_number):
-    """Sends SMS to the doctor if credentials exist."""
-    if not twilio_client or not DOCTOR_PHONE:
-        print("DEBUG: SMS skipped (No credentials or phone number).")
-        return
+    """Sends a real SMS to the doctor's phone."""
+    # 1. Get variables (ensure these are in your .env)
+    doctor_phone = os.environ.get("DOCTOR_PHONE")
+    my_twilio_number = os.environ.get("TWILIO_PHONE_NUMBER")
     
+    # 2. Safety Check: Don't crash if keys are missing
+    if not twilio_sms_client or not doctor_phone or not my_twilio_number:
+        print("DEBUG: Cannot send SMS. Missing keys or phone numbers in .env")
+        return
+
+    # 3. Send the Message
     try:
-        message = twilio_client.messages.create(
-            body=f"🚨 JK DEMO ALERT 🚨\nPatient {user_number} needs help!\nMsg: {user_msg}",
-            from_=os.environ.get("TWILIO_PHONE_NUMBER"),
-            to=DOCTOR_PHONE
+        message = twilio_sms_client.messages.create(
+            body=f"🚨 DENTIST BOT ALERT 🚨\nPatient {user_number} needs help!\nMessage: \"{user_msg}\"",
+            from_=my_twilio_number,
+            to=doctor_phone
         )
-        print(f"DEBUG: Alert sent! SID: {message.sid}")
+        print(f"DEBUG: Emergency SMS sent! SID: {message.sid}")
     except Exception as e:
-        print(f"DEBUG: Failed to send SMS: {e}")
+        print(f"DEBUG: SMS Failed: {e}")
 
 @app.route("/webhook", methods=['POST'])
 def whatsapp_reply():
@@ -120,6 +130,8 @@ def whatsapp_reply():
     if user_msg.lower().strip() == "reset":
         threads[sender_id] = []
         save_memory(threads)
+        resp = MessagingResponse()
+        resp.message("Memory cleared!")
         return str(MessagingResponse().message("Memory cleared!"))
 
     # 2. INJECT CALENDAR DATA
