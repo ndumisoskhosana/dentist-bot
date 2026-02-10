@@ -1,7 +1,9 @@
 import os
-import json  # <--- NEW: To handle file storage
+import json
+import datetime
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.rest import Client as TwilioClient
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -9,80 +11,168 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-client = OpenAI(
+# --- API CLIENTS ---
+groq_client = OpenAI(
     api_key=os.environ.get("GROQ_API_KEY"),
     base_url="https://api.groq.com/openai/v1"
 )
 
-SYSTEM_PROMPT = """
-You are 'Thandi', the receptionist for Dr. Molefe Dental (Sandton).
-1. Prices: Cleaning R850, Consultation R500.
-2. Medical Aid: ONLY Discovery KeyCare and Momentum.
-3. Keep answers under 50 words.
+# Optional: Only needed if you want the SMS alert feature working
+twilio_client = None
+if os.environ.get("TWILIO_ACCOUNT_SID"):
+    twilio_client = TwilioClient(
+        os.environ.get("TWILIO_ACCOUNT_SID"),
+        os.environ.get("TWILIO_AUTH_TOKEN")
+    )
+
+# --- CONFIGURATION ---
+# For the demo, put YOUR number here so YOU get the alert!
+DOCTOR_PHONE = os.environ.get("DOCTOR_PHONE") 
+DB_FILE = "memory.json"
+CALENDAR_FILE = "calendar.json"
+REVENUE_FILE = "missed_revenue.txt"
+
+# --- THE BRAIN (JK THE DENTIST) ---
+BASE_SYSTEM_PROMPT = """
+You are 'Jay', the AI concierge for **JK The Dentist** in Parktown North.
+The practice is run by **Dr. Jan van Schalkwyk** (Dr. Jan).
+Your goal is to be professional, warm, and efficient.
+
+**CLINIC DETAILS:**
+- **Location:** 11 12th Ave, Parktown North.
+- **Hours:** Mon-Thu 08:00-17:00, Fri 08:00-16:00.
+- **Vibe:** Tranquil, modern, high-tech (we do "Same-Day Crowns" and Laser Dentistry).
+
+**SERVICES & PRICING GUIDES (Estimates):**
+- **Consultation:** R850 - R1,200 (includes basic x-rays).
+- **Cleaning (Oral Hygiene):** ~R950 (Ask if they want to see Fhatu, our hygienist).
+- **Teeth Whitening:** We use the Pola Professional Laser system (In-chair).
+- **Invisalign:** We are certified providers. Requires a consult first.
+- **Emergency:** If they are in pain, prioritize them!
+
+**MEDICAL AID POLICY:**
+- We are a private practice. Patients usually pay upfront and claim back from their medical aid.
+- We DO NOT accept Discovery KeyCare or basic network plans directly.
+
+**RULES:**
+1. **Escalation:** If the user asks for a human, is angry, or has a medical emergency (swelling/bleeding), output strictly: ACTION_ESCALATE
+2. **Booking:** If user confirms a slot, output: ACTION_BOOK: Day|Time
+3. **Full:** If no slots are open, output: ACTION_LOG_MISSED
+4. **Tone:** Use South African warmth. Keep replies short for WhatsApp.
 """
 
-# --- DATABASE FUNCTIONS (File I/O) ---
-DB_FILE = "memory.json"
-
+# --- HELPER FUNCTIONS ---
+# CORRECT VERSION
 def get_memory():
-    """Reads the chat history from the hard drive."""
     if not os.path.exists(DB_FILE):
-        return {}  # Return empty dict if file doesn't exist yet
+        return {}
     try:
+        # Press Enter here! The 'with' must be on its own line.
         with open(DB_FILE, 'r') as f:
             return json.load(f)
     except:
-        return {} # Handle empty/corrupt files
+        return {}
 
-def save_memory(memory_dict):
-    """Writes the chat history to the hard drive."""
-    with open(DB_FILE, 'w') as f:
-        json.dump(memory_dict, f, indent=2)
+def save_memory(data):
+    with open(DB_FILE, 'w') as f: json.dump(data, f, indent=2)
+
+def get_calendar():
+    if not os.path.exists(CALENDAR_FILE):
+        return "No slots available."
+    try:
+        # Press Enter here too!
+        with open(CALENDAR_FILE, 'r') as f:
+            data = json.load(f)
+            # Format nicely as a list
+            return "\n".join([f"• *{day}*: {', '.join(slots)}" for day, slots in data.items()])
+    except:
+        return "Error loading schedule."
+
+def log_missed_revenue(user_number):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(REVENUE_FILE, "a") as f:
+        f.write(f"[{timestamp}] Lost Patient: {user_number} (No Slots)\n")
+
+def send_emergency_sms(user_msg, user_number):
+    """Sends SMS to the doctor if credentials exist."""
+    if not twilio_client or not DOCTOR_PHONE:
+        print("DEBUG: SMS skipped (No credentials or phone number).")
+        return
+    
+    try:
+        message = twilio_client.messages.create(
+            body=f"🚨 JK DEMO ALERT 🚨\nPatient {user_number} needs help!\nMsg: {user_msg}",
+            from_=os.environ.get("TWILIO_PHONE_NUMBER"),
+            to=DOCTOR_PHONE
+        )
+        print(f"DEBUG: Alert sent! SID: {message.sid}")
+    except Exception as e:
+        print(f"DEBUG: Failed to send SMS: {e}")
 
 @app.route("/webhook", methods=['POST'])
 def whatsapp_reply():
     sender_id = request.form.get('From')
     user_msg = request.form.get('Body')
-    
     print(f"DEBUG: {sender_id} says: {user_msg}")
 
-    # 1. LOAD: Fetch history from the file
+    # 1. RESET COMMAND
     threads = get_memory()
-    
-    # 2. CLEAR COMMAND (Optional)
     if user_msg.lower().strip() == "reset":
         threads[sender_id] = []
         save_memory(threads)
-        resp = MessagingResponse()
-        resp.message("Memory cleared!")
-        return str(resp)
+        return str(MessagingResponse().message("Memory cleared!"))
 
-    # 3. Get User's History
+    # 2. INJECT CALENDAR DATA
+    current_slots = get_calendar()
+    dynamic_prompt = f"""
+    {BASE_SYSTEM_PROMPT}
+    --- LIVE AVAILABILITY ---
+    {current_slots}
+    -------------------------
+    """
+
+    # 3. GENERATE AI RESPONSE
     user_history = threads.get(sender_id, [])
     user_history.append({"role": "user", "content": user_msg})
-
-    # 4. Generate Reply
-    messages_payload = [{"role": "system", "content": SYSTEM_PROMPT}] + user_history
     
     try:
-        response = client.chat.completions.create(
+        response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=messages_payload
+            messages=[{"role": "system", "content": dynamic_prompt}] + user_history
         )
-        bot_reply = response.choices[0].message.content
+        raw_reply = response.choices[0].message.content
+        final_reply = raw_reply
+
+        # --- ACTION TRIGGERS ---
         
-        # 5. SAVE: Update history and write back to file
-        user_history.append({"role": "assistant", "content": bot_reply})
+        # A. Human Handoff (Escalation)
+        if "ACTION_ESCALATE" in raw_reply:
+            send_emergency_sms(user_msg, sender_id)
+            final_reply = "I've alerted Dr. Jan's team directly. Someone will contact you shortly."
+
+        # B. Missed Revenue Logger
+        elif "ACTION_LOG_MISSED" in raw_reply:
+            log_missed_revenue(sender_id)
+            final_reply = raw_reply.replace("ACTION_LOG_MISSED", "").strip()
+
+        # C. Booking Handler
+        elif "ACTION_BOOK:" in raw_reply:
+            # We strip the command so the user doesn't see it
+            final_reply = raw_reply.split("ACTION_BOOK:")[0].strip()
+            # (In a real app, you would delete the slot from calendar.json here)
+
+        # -----------------------
+
+        user_history.append({"role": "assistant", "content": final_reply})
         threads[sender_id] = user_history
-        save_memory(threads)  # <--- CRITICAL: Saves to disk
+        save_memory(threads)
 
     except Exception as e:
         print(f"Error: {e}")
-        bot_reply = "Sorry, my brain is offline."
+        final_reply = "Sorry, our system is currently updating. Please try again in a moment."
 
     resp = MessagingResponse()
-    resp.message(bot_reply)
+    resp.message(final_reply)
     return str(resp)
 
 if __name__ == "__main__":
