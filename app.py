@@ -31,7 +31,7 @@ except Exception as e:
 # For the demo, put YOUR number here so YOU get the alert!
 DOCTOR_PHONE = os.environ.get("DOCTOR_PHONE") 
 DB_FILE = "memory.json"
-CALENDAR_FILE = "calendar.json"
+CALENDER_FILE = "calender.json"
 REVENUE_FILE = "missed_revenue.txt"
 
 # --- THE BRAIN (JK THE DENTIST) ---
@@ -80,12 +80,12 @@ def get_memory():
 def save_memory(data):
     with open(DB_FILE, 'w') as f: json.dump(data, f, indent=2)
 
-def get_calendar():
-    if not os.path.exists(CALENDAR_FILE):
+def get_calender():
+    if not os.path.exists(CALENDER_FILE):
         return "No slots available."
     try:
         # Press Enter here too!
-        with open(CALENDAR_FILE, 'r') as f:
+        with open(CALENDER_FILE, 'r') as f:
             data = json.load(f)
             # Format nicely as a list
             return "\n".join([f"• *{day}*: {', '.join(slots)}" for day, slots in data.items()])
@@ -134,8 +134,8 @@ def whatsapp_reply():
         resp.message("Memory cleared!")
         return str(MessagingResponse().message("Memory cleared!"))
 
-    # 2. INJECT CALENDAR DATA
-    current_slots = get_calendar()
+    # 2. INJECT CALENDER DATA
+    current_slots = get_calender()
     dynamic_prompt = f"""
     {BASE_SYSTEM_PROMPT}
     --- LIVE AVAILABILITY ---
@@ -171,7 +171,7 @@ def whatsapp_reply():
         elif "ACTION_BOOK:" in raw_reply:
             # We strip the command so the user doesn't see it
             final_reply = raw_reply.split("ACTION_BOOK:")[0].strip()
-            # (In a real app, you would delete the slot from calendar.json here)
+            # (In a real app, you would delete the slot from calender.json here)
 
         # -----------------------
 
