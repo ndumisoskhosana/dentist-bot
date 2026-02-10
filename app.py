@@ -158,7 +158,7 @@ def whatsapp_reply():
         
         # A. Human Handoff (Escalation)
         if "ACTION_ESCALATE" in raw_reply:
-            # send_emergency_sms(user_msg, sender_id)
+            send_emergency_sms(user_msg, sender_id)
             final_reply = "I've alerted Dr. Jan's team directly. Someone will contact you shortly."
 
         # B. Missed Revenue Logger
